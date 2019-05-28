@@ -79,6 +79,11 @@ SpeechNoiseMix
 .. autoclass:: SpeechNoiseMix
     :members:
 
+Mixup
+~~~~~
+.. autoclass:: Mixup
+    :members:
+
 Utils
 -----
 
