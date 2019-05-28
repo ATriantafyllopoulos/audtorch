@@ -3,6 +3,9 @@ import random
 import numpy as np
 from torch.utils.data import Dataset
 
+from audtorch.transforms import RandomCrop
+from audtorch.transforms.functional import additive_mix, normalize
+
 from .base import _include_repr
 from .utils import ensure_same_sampling_rate
 
@@ -58,6 +61,7 @@ class SpeechNoiseMix(Dataset):
         >>> sd.play(noisy.transpose(), data.sampling_rate)
 
     """  # noqa: E501
+
     def __init__(self, speech_dataset, mix_transform, *, transform=None,
                  target_transform=None, joint_transform=None,
                  percentage_silence=0):
@@ -126,4 +130,118 @@ class SpeechNoiseMix(Dataset):
             fmt_str += _include_repr('Target Transform', self.target_transform)
         if self.joint_transform:
             fmt_str += _include_repr('Joint Transform', self.joint_transform)
+        return fmt_str
+
+
+class Mixup(Dataset):
+    r"""Mix samples of the same class.
+
+    This data set can be used for data augmentation by mixing together two
+    signals from the same data set. It loads a sample of the same class
+    and mixes the two signals together. Then it returns the mixture signal
+    with the same initial label. It also implicitly normalizes the input
+    signal.
+
+    * :attr:`dataset` controls the speech data set
+    * :attr:`percentage_mix` controls the percentage of samples that will be
+      mixed with other samples
+    * :attr:`targets_attribute` controls the attribute that holds the targets
+      of the underlying data set
+    * :attr:`ratios` controls the SNRs with which to mix the two signals
+    * :attr:`transform` controls the transform applied on the mix
+    * :attr:`target_transform` controls the transform applied on the label
+
+    Args:
+        dataset (Dataset): underlying data set
+        percentage_mix (float, optional): value between `0` and `1`, which
+            controls the percentage of samples to be mixed. Default: `0`
+        targets_attribute (str, optional): string controlling the attribute
+            of the underlying data set that holds targets. Default: `targets`
+        ratios (list, optional): list of SNRs to randomly choose from when
+            mixing two samples. Default: [0, 5, 10]
+        transform (callable, optional): Function/transform applied on the
+            speech-noise-mixture (input). Default; `None`.
+        target_transform (callable, optional): Function/transform applied
+            on the speech (target). Default: `None`.
+
+    Examples:
+        >>> dataset = audtorch.datasets.MozillaCommonVoice(label_type='gender')
+        >>> data = dcase.datasets.Mixup(dataset, percentage_mix=1)
+        >>> print(data)
+        Dataset Mixup
+            Number of data points: 74059
+            Underlying dataset: MozillaCommonVoice
+            Sampling rate: 48000Hz
+            Augmentation: 100%
+        >>> signal, label = data[0]
+        >>> sounddevice.play(signal, data.sampling_rate)
+
+    """
+
+    def __init__(self, dataset, *, percentage_mix=0,
+                 targets_attribute='targets', ratios=None,
+                 transform=None, target_transform=None):
+        super().__init__()
+        self.dataset = dataset
+        self.percentage_mix = percentage_mix
+        self.ratios = ratios
+        if self.ratios is None:
+            self.ratios = [0, 5, 10]
+        self.transform = transform
+        self.target_transform = target_transform
+        self.crop = RandomCrop(size=0)
+
+        if not (0 <= self.percentage_mix <= 1):
+            raise ValueError('`percentage_mix` needs to be in [0, 1]`')
+
+        if not hasattr(dataset, targets_attribute):
+            raise ValueError('{} is not part of {}'.format(
+                targets_attribute, self.dataset))
+
+        targets = getattr(self.dataset, targets_attribute)
+        self.targets_dict = {}
+        for label in np.unique(targets):
+            self.targets_dict[label] = [i for i, x in enumerate(targets)
+                                        if x == label]
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, item):
+        signal, label = self.dataset[item]
+        signal = normalize(signal)
+
+        if random.random() < self.percentage_mix:
+            mix = self.dataset[random.choice(self.targets_dict[label])][0]
+            mix = normalize(mix)
+            self.crop.size = signal.shape[-1]
+            mix = self.crop(mix)
+            signal = additive_mix(signal, mix,
+                                  ratio=random.choice(self.ratios))
+
+        if self.transform is not None:
+            signal = self.transform(signal)
+
+        if self.target_transform is not None:
+            label = self.target_transform(label)
+
+        return signal, label
+
+    @property
+    def sampling_rate(self):
+        return self.dataset.sampling_rate
+
+    def __repr__(self):
+        dataset_name = self.dataset.__class__.__name__
+        fmt_str = 'Dataset {}\n'.format(self.__class__.__name__)
+        fmt_str += '    Number of data points: {}\n'.format(self.__len__())
+        fmt_str += '    Underlying dataset: {}\n'.format(dataset_name)
+        fmt_str += '    Sampling rate: {}Hz\n'.format(self.sampling_rate)
+        if self.percentage_mix > 0:
+            fmt_str += ('    Augmentation: {:.0f}%\n'
+                        .format(100 * self.percentage_mix))
+        if self.transform:
+            fmt_str += _include_repr('Transform', self.transform)
+        if self.target_transform:
+            fmt_str += _include_repr('Target Transform', self.target_transform)
         return fmt_str
